@@ -93,7 +93,7 @@ Double-click **Multi-Internet** on the desktop and click **Yes** on the Windows 
 - If the server stops answering, the app switches back to your normal internet and tells you on the pill.
 
 **Seeing the pill over Tibia:** the pill stays on top the same way [OnTopReplica](https://github.com/LorenzCK/OnTopReplica) does:
-a Windows "topmost" window that never takes focus away from the game, re-raised every second.
+it's a Windows "always on top" (topmost) window. It also re-raises itself every second, and clicking it never takes focus away from the game.
 This works when Tibia runs in a **window** (maximized or borderless). Windows doesn't let any normal app draw over an
 *exclusive* fullscreen game; only programs that hook into the game itself can, and that risks BattlEye.
 If you play fullscreen and can't see the pill, switch Tibia to windowed, maximized. You'll still hear a beep when a connection goes down.
