@@ -1,5 +1,7 @@
 # Tibia Multi-Internet (macOS)
 
+> **On Windows?** See the [Windows version](windows/README.md): Wi-Fi + cable + iPhone/Android, no Mac needed.
+
 Play Tibia over **two internet connections at once**: your Wi-Fi and your iPhone (USB tethering).
 Every game packet is sent over both. If one connection drops or lags, the other copy is already
 arriving, so you don't disconnect. It works like ExitLag/NoPing "multi-internet", but it runs
