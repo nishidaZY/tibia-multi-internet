@@ -1,0 +1,10 @@
+# your private keys and your server's details: never publish these
+*.key
+*.pub
+oracle_ssh
+oci.*
+server.ip
+game-routes.txt
+local-old/
+app/Multi-Internet.app/
+.DS_Store
