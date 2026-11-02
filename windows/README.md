@@ -76,8 +76,9 @@ Setup is safe to rerun: it continues where it stopped.
 ## 3. Connect your second internet
 
 - **Wi-Fi + cable:** plug in the cable and stay connected to Wi-Fi too. Windows keeps both connections up.
-- **iPhone:** install **Apple Devices** from the Microsoft Store (or iTunes) so Windows has the iPhone driver.
+- **iPhone:** install **Apple Devices** from the Microsoft Store (or iTunes) and open it once, so it installs the iPhone driver.
   Connect the iPhone by USB, tap **Trust**, and turn on **Settings → Personal Hotspot → Allow Others to Join**.
+  You can also join the iPhone's hotspot over Wi-Fi (with cable for your home internet): the pill still shows it as iPhone and counts its data.
 - **Android:** connect by USB and turn on **Settings → Hotspot & tethering → USB tethering**.
 
 Before you connect, the pill shows each connection it found as a grey dot. If one is missing, Windows doesn't see it as an internet connection yet.

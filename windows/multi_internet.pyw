@@ -1,6 +1,6 @@
 """Tibia Multi-Internet for Windows: a small pill that floats over Tibia. While connected, every
 Tibia game packet goes to your Oracle server over ALL your connections at once (Wi-Fi, cable,
-iPhone or Android USB). If one drops, the other copy is already arriving.
+iPhone USB or hotspot, Android USB). If one drops, the other copy is already arriving.
 [● Wi-Fi ● Cable ● iPhone  12 MB  Connect]   green = working, red = failing, grey = not connected.
 MB = phone data used by the tunnel this month. Drag to move. Right-click: reset counter / quit.
 Run: pythonw multi_internet.pyw   (asks for admin: WireGuard needs it)
@@ -24,9 +24,10 @@ SCAN = ("Get-NetIPConfiguration | ? { $_.IPv4DefaultGateway -and $_.NetAdapter.S
         "d=[string]$_.InterfaceDescription; m=[string]$_.NetAdapter.PhysicalMediaType} } | ConvertTo-Json -Compress")
 
 
-def kind(desc, media):
+def kind(desc, media, ip=""):
     d = desc.lower()
     if "apple mobile device" in d: return "iPhone"   # iPhone USB tethering (needs Apple Devices or iTunes)
+    if ip.startswith("172.20.10."): return "iPhone"  # iPhone Personal Hotspot over Wi-Fi always uses 172.20.10.0/28
     if "ndis" in d: return "Phone"                   # Android USB tethering (Remote NDIS)
     if "802.11" in media or "wireless" in d or "wi-fi" in d or "wifi" in d: return "Wi-Fi"
     return "Cable"
@@ -39,7 +40,7 @@ def parse_scan(out):
     paths, seen = {}, {}
     for a in sorted(items, key=lambda a: a["i"]):
         if not a.get("ip") or any(s in a["d"].lower() for s in SKIP): continue
-        k = kind(a["d"], a["m"]); seen[k] = seen.get(k, 0) + 1
+        k = kind(a["d"], a["m"], a["ip"]); seen[k] = seen.get(k, 0) + 1
         paths[(a["i"], a["ip"])] = k if seen[k] == 1 else f"{k} {seen[k]}"
     return paths
 
@@ -61,6 +62,9 @@ if "--selftest" in sys.argv:
                    '{"i":8,"ip":"10.1.0.2","d":"Intel(R) Ethernet I219-V","m":"802.3"}]')
     assert p == {(7, "192.168.0.6"): "Cable", (8, "10.1.0.2"): "Cable 2", (9, "10.0.0.2"): "Phone",
                  (12, "192.168.0.5"): "Wi-Fi", (30, "172.20.10.2"): "iPhone"}, p
+    assert parse_scan('[{"i":5,"ip":"172.20.10.4","d":"Realtek 8852CE WiFi 6E PCI-E NIC","m":"Native 802.11"},'
+                      '{"i":6,"ip":"192.168.15.76","d":"Realtek PCIe GbE Family Controller","m":"802.3"}]') == \
+        {(5, "172.20.10.4"): "iPhone", (6, "192.168.15.76"): "Cable"}
     assert parse_scan('{"i":3,"ip":"1.2.3.4","d":"Realtek","m":"802.3"}') == {(3, "1.2.3.4"): "Cable"}
     assert parse_scan("") == {}
     c = make_conf("K", "P", ["1.0.0.0/8", "172.65.0.0/16", ""])
@@ -354,7 +358,7 @@ class App:
     def reset_usage(self): self.usage[time.strftime("%Y-%m")] = 0; self.save_usage()
 
 
-def gb(b): return f"{int(b / 1e6)} MB" if b < 1e9 else f"{b / 1e9:.2f} GB"
+def gb(b): return f"{int(b / 1e3)} KB" if b < 1e6 else f"{int(b / 1e6)} MB" if b < 1e9 else f"{b / 1e9:.2f} GB"
 
 
 def rounded(c, x1, y1, x2, y2, r, fill):
