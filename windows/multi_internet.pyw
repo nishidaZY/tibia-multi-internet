@@ -11,6 +11,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)  # keys, server.ip and game-routes.txt live in the project folder
 TUNNEL = "tibia-mi"
 LOCAL, SERVER_PORT = 51830, 51821
+INSTANCE = r"Global\tibia-mi-multi-internet"  # Windows frees this mutex when the app ends, even after a crash
 HB = b"\x00"          # heartbeat; real WireGuard packets are >= 32 bytes
 HEALTHY, DEAD = 2.5, 8  # seconds without a server answer: path counts as down / server counts as dead
 IP_UNICAST_IF = 31    # Windows: send this socket's packets out one interface (index, network byte order)
@@ -45,12 +46,22 @@ def parse_scan(out):
     return paths
 
 
-def make_conf(key, server_pub, routes):
+def make_conf(key, server_pub, routes, port=LOCAL):
     """WireGuard sends to our duplicator on 127.0.0.1; only the game routes enter the tunnel
     (Cloudflare blocks the Tibia login from datacenter IPs, so never the whole internet)."""
     return ("[Interface]\nPrivateKey = %s\nAddress = 10.66.0.2/32\nMTU = 1280\n\n[Peer]\nPublicKey = %s\n"
             "Endpoint = 127.0.0.1:%d\nAllowedIPs = %s\nPersistentKeepalive = 1\n"
-            % (key, server_pub, LOCAL, ", ".join(r for r in routes if r)))
+            % (key, server_pub, port, ", ".join(r for r in routes if r)))
+
+
+def bind_local(sock, port=LOCAL):
+    """Uses the usual port, or any free one if another program holds it: the WireGuard config
+    is rewritten on every connect, so it always points at the port we actually got."""
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        sock.bind(("127.0.0.1", 0))
+    return sock.getsockname()[1]
 
 
 if "--selftest" in sys.argv:
@@ -69,6 +80,11 @@ if "--selftest" in sys.argv:
     assert parse_scan("") == {}
     c = make_conf("K", "P", ["1.0.0.0/8", "172.65.0.0/16", ""])
     assert "AllowedIPs = 1.0.0.0/8, 172.65.0.0/16\n" in c and "Endpoint = 127.0.0.1:51830" in c
+    assert "Endpoint = 127.0.0.1:12345\n" in make_conf("K", "P", ["1.0.0.0/8"], 12345)
+    held, spare = socket.socket(socket.AF_INET, socket.SOCK_DGRAM), socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    held.bind(("127.0.0.1", 0))
+    assert bind_local(spare, held.getsockname()[1]) not in (0, held.getsockname()[1])  # busy port -> another free one
+    held.close(); spare.close()
     print("selftest ok"); sys.exit()
 
 import tkinter as tk  # noqa: E402  (after the selftest so it runs anywhere)
@@ -111,7 +127,7 @@ class Dup:
         self.server, self.scanner = (server, SERVER_PORT), scanner
         self.wg = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.wg.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
-        self.wg.bind(("127.0.0.1", LOCAL))
+        self.port = bind_local(self.wg)
         self.sel, self.lock = selectors.DefaultSelector(), threading.Lock()
         self.sel.register(self.wg, selectors.EVENT_READ, "wg")
         self.paths, self.last_rx, self.used = {}, {}, {}  # key (ifindex, ip) -> socket / time / bytes incl. 28-byte IP+UDP header
@@ -184,14 +200,14 @@ def tunnel_down():
     run([WG_EXE, "/uninstalltunnelservice", TUNNEL])
 
 
-def tunnel_up():
+def tunnel_up(port):
     routes = read("game-routes.txt").splitlines()
     tunnel_down()
     os.makedirs(CONF_DIR, exist_ok=True)
     # the config holds your private key: only Administrators and SYSTEM may read it
     run(["icacls", CONF_DIR, "/inheritance:r", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"])
     with open(CONF, "w", newline="\n") as f:
-        f.write(make_conf(read("mac.key"), read("server.pub"), routes))
+        f.write(make_conf(read("mac.key"), read("server.pub"), routes, port))
     return run([WG_EXE, "/installtunnelservice", CONF])
 
 
@@ -261,9 +277,9 @@ class App:
     def connect(self):
         try:
             self.dup = Dup(read("server.ip"), self.scanner)
-        except OSError:
-            self.busy = False; return self.say("Port 51830 busy: close other copies")
-        r = tunnel_up()
+        except OSError as e:
+            self.busy = False; return self.say("Can't connect: " + str(e)[:40])
+        r = tunnel_up(self.dup.port)
         if r.returncode:
             self.dup.stop(); self.dup = None; self.busy = False
             return self.say("WireGuard failed: " + (r.stderr or r.stdout).strip()[:40])
@@ -366,8 +382,35 @@ def rounded(c, x1, y1, x2, y2, r, fill):
                                  x1, y2, x1, y2 - r, x1, y1 + r, x1, y1, smooth=True, fill=fill, outline=""))
 
 
+def kernel32():
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.OpenMutexW.restype = k.CreateMutexW.restype = ctypes.c_void_p  # handles are 64-bit
+    return k
+
+
+def other_copy_running(name=INSTANCE):
+    """Check only, so a second launch needs no UAC prompt. Access denied also means it exists:
+    the running copy is elevated and this one isn't."""
+    k = kernel32()
+    h = k.OpenMutexW(0x100000, False, name)  # SYNCHRONIZE
+    if h: k.CloseHandle(ctypes.c_void_p(h)); return True
+    return ctypes.get_last_error() != 2  # ERROR_FILE_NOT_FOUND
+
+
+def claim_instance(name=INSTANCE):
+    """Atomic, so two copies launched together can't both win. The handle stays open until we exit."""
+    h = kernel32().CreateMutexW(None, False, name)
+    return bool(h) and ctypes.get_last_error() != 183  # ERROR_ALREADY_EXISTS
+
+
 if __name__ == "__main__":
-    if not ctypes.windll.shell32.IsUserAnAdmin():  # WireGuard tunnels need admin: relaunch elevated (UAC prompt)
+    admin = ctypes.windll.shell32.IsUserAnAdmin()
+    # must come before App(): its startup tunnel_down() would cut the running copy's tunnel mid-game
+    if (not claim_instance()) if admin else other_copy_running():
+        ctypes.windll.user32.MessageBoxW(None, "Multi-Internet is already running. Look for the pill on your screen; "
+                                         "right-click it to quit.", "Multi-Internet", 0x40 | 0x10000 | 0x40000)
+        sys.exit()
+    if not admin:  # WireGuard tunnels need admin: relaunch elevated (UAC prompt)
         ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{os.path.abspath(__file__)}"', HERE, 1)
         sys.exit()
     App()
