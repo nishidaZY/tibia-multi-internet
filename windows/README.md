@@ -109,7 +109,7 @@ but check your plan. The pill counts it and tells you every 1 GB.
 - **"WireGuard failed"**: reinstall WireGuard from <https://www.wireguard.com/install/>.
 - **Tibia stopped connecting after a crash**: open Multi-Internet and quit it. This removes any leftover tunnel.
   Or run this as administrator: `& "C:\Program Files\WireGuard\wireguard.exe" /uninstalltunnelservice tibia-mi`.
-- **"Multi-Internet is already running"**: only one copy can run, so a second launch never disturbs your connection. Use the pill that's already open, or right-click it and quit first.
+- **Can't find the pill**: open Multi-Internet again. Only one copy can run, so this doesn't disturb your connection: it moves the open pill to the bottom-right corner of your main monitor. If that copy has frozen, a message tells you what to do.
 - **Windows Firewall asks about Python**: allow it on private networks.
 - **A world isn't covered** (lag goes away after Disconnect): log into that world, delete `game-routes.txt`, and run setup again.
 - **Mac and PC with the same server**: they share the same key (`mac.key`), so use one at a time.

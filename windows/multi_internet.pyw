@@ -5,7 +5,7 @@ iPhone USB or hotspot, Android USB). If one drops, the other copy is already arr
 MB = phone data used by the tunnel this month. Drag to move. Right-click: reset counter / quit.
 Run: pythonw multi_internet.pyw   (asks for admin: WireGuard needs it)
 Self-check without Windows: python3 multi_internet.pyw --selftest"""
-import ctypes, json, os, selectors, socket, struct, subprocess, sys, threading, time
+import ctypes, ctypes.wintypes, json, os, selectors, socket, struct, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)  # keys, server.ip and game-routes.txt live in the project folder
@@ -93,6 +93,7 @@ WG_EXE = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Wire
 CONF_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "tibia-mi")
 CONF = os.path.join(CONF_DIR, TUNNEL + ".conf")
 USAGE = os.path.join(os.environ.get("APPDATA", HERE), "tibia-mi", "usage.json")
+SHOW = os.path.join(os.path.dirname(USAGE), "show-pill")  # a second launch creates this: the running pill comes back
 
 
 def run(args, timeout=30):
@@ -104,6 +105,16 @@ def run(args, timeout=30):
 
 def read(name):
     with open(os.path.join(ROOT, name)) as f: return f.read().strip()
+
+
+def user32():
+    """Real HWND types: a bare -1 isn't a reliable 64-bit HWND_TOPMOST."""
+    u, H = ctypes.WinDLL("user32"), ctypes.wintypes.HWND
+    u.GetParent.restype, u.GetParent.argtypes = H, [H]
+    u.GetWindowLongW.argtypes, u.SetWindowLongW.argtypes = [H, ctypes.c_int], [H, ctypes.c_int, ctypes.c_long]
+    u.MonitorFromWindow.restype, u.MonitorFromWindow.argtypes = ctypes.c_void_p, [H, ctypes.c_uint]
+    u.SetWindowPos.argtypes = [H, H, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+    return u
 
 
 class Scanner(threading.Thread):
@@ -236,20 +247,36 @@ class App:
         m.add_command(label="Quit (disconnects)", command=self.quit)
         self.c.bind("<Button-3>", lambda e: m.tk_popup(e.x_root, e.y_root))
         r.update_idletasks()
-        r.geometry(f"+{r.winfo_screenwidth() - 340}+{r.winfo_screenheight() - 90}")
-        self.hwnd = ctypes.windll.user32.GetParent(r.winfo_id())
-        u = ctypes.windll.user32
+        u = self.u = user32()
+        self.hwnd = u.GetParent(r.winfo_id())
+        self.to_corner()
         # like OnTopReplica: a topmost tool window; NOACTIVATE = clicking it never takes focus away from Tibia
-        u.SetWindowLongW(self.hwnd, -20, u.GetWindowLongW(self.hwnd, -20) | 0x80 | 0x08000000 | 0x8)
+        u.SetWindowLongW(self.hwnd, -20, u.GetWindowLongW(self.hwnd, -20) | 0x80 | 0x08000000)
         r.protocol("WM_DELETE_WINDOW", self.quit)
+        self.clear_show()
+        self.render(); self.keep_on_top(); r.update(); self.to_corner()  # visible first: the cleanup below can take seconds
         tunnel_down()  # a leftover tunnel from a crash would send the game into nothing
-        self.tick(); self.keep_on_top()
+        self.tick()
         r.mainloop()
 
-    # ---- topmost: Tibia (and fullscreen apps) can push themselves above us, so re-assert every second
+    # ---- always visible: every second make sure nothing has buried the pill or left it off-screen
     def keep_on_top(self):
-        ctypes.windll.user32.SetWindowPos(self.hwnd, -1, 0, 0, 0, 0, 0x1 | 0x2 | 0x10)  # HWND_TOPMOST, NOSIZE|NOMOVE|NOACTIVATE
-        self.root.after(1000, self.keep_on_top)
+        self.root.after(1000, self.keep_on_top)  # first, so a failure below can't end the loop
+        if not self.u.MonitorFromWindow(self.hwnd, 0): self.to_corner()  # MONITOR_DEFAULTTONULL: e.g. monitor unplugged
+        # only ever touches our own window: nothing here looks at Tibia's window or process (BattlEye)
+        # both calls: Windows sometimes reports success for TOPMOST alone but leaves the window buried
+        for where in (-2, -1):  # HWND_NOTOPMOST, HWND_TOPMOST
+            self.u.SetWindowPos(self.hwnd, ctypes.wintypes.HWND(where), 0, 0, 0, 0, 0x1 | 0x2 | 0x10 | 0x40)  # NOSIZE|NOMOVE|NOACTIVATE|SHOWWINDOW
+
+    def to_corner(self):
+        x, y = self.root.winfo_screenwidth() - 340, self.root.winfo_screenheight() - 90
+        self.root.geometry(f"+{x}+{y}")
+        # directly as well: Tk skips the move if it already believes the window is there
+        self.u.SetWindowPos(self.hwnd, None, x, y, 0, 0, 0x1 | 0x4 | 0x10)  # NOSIZE|NOZORDER|NOACTIVATE
+
+    def clear_show(self):
+        try: os.remove(SHOW); return True
+        except OSError: return False
 
     # ---- drag anywhere; a click without moving on the button = button press
     def press(self, e):
@@ -300,6 +327,8 @@ class App:
     # ---- every 0.5 s: path health, alerts, data counter, server watchdog
     def tick(self):
         self.root.after(500, self.tick)
+        if self.clear_show():  # someone opened the app again: they can't find the pill
+            self.to_corner(); self.say("Here I am", 5)
         if self.server_dead:
             self.server_dead = False; self.disconnect("Server unreachable: normal internet now")
         if not (self.on and self.dup):
@@ -403,12 +432,30 @@ def claim_instance(name=INSTANCE):
     return bool(h) and ctypes.get_last_error() != 183  # ERROR_ALREADY_EXISTS
 
 
+def summon_pill(wait=3):
+    """Asks the running copy to come back to the corner. False if it never answers (it's frozen)."""
+    try:
+        os.makedirs(os.path.dirname(SHOW), exist_ok=True)
+        open(SHOW, "w").close()
+    except OSError:
+        return False
+    end = time.time() + wait
+    while time.time() < end:
+        if not os.path.exists(SHOW): return True
+        time.sleep(0.1)
+    try: os.remove(SHOW)
+    except OSError: pass
+    return False
+
+
 if __name__ == "__main__":
-    admin = ctypes.windll.shell32.IsUserAnAdmin()
+    admin =ctypes.windll.shell32.IsUserAnAdmin()
     # must come before App(): its startup tunnel_down() would cut the running copy's tunnel mid-game
     if (not claim_instance()) if admin else other_copy_running():
-        ctypes.windll.user32.MessageBoxW(None, "Multi-Internet is already running. Look for the pill on your screen; "
-                                         "right-click it to quit.", "Multi-Internet", 0x40 | 0x10000 | 0x40000)
+        if not summon_pill():
+            ctypes.windll.user32.MessageBoxW(None, "Multi-Internet is already running but not responding. Restart your PC, "
+                                             "or end pythonw.exe in Task Manager, then open it again.",
+                                             "Multi-Internet", 0x30 | 0x10000 | 0x40000)
         sys.exit()
     if not admin:  # WireGuard tunnels need admin: relaunch elevated (UAC prompt)
         ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{os.path.abspath(__file__)}"', HERE, 1)
