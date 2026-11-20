@@ -4,7 +4,8 @@
 oracle_ssh
 oci.*
 server.ip
-game-routes.txt
+game-routes*.txt
 local-old/
 app/Multi-Internet.app/
 .DS_Store
+__pycache__/

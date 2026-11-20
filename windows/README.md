@@ -55,12 +55,15 @@ powershell -ExecutionPolicy Bypass -File windows\setup.ps1
 
 This installs **Python** and **WireGuard** with `winget` if they are missing. If it installs Python, it asks you to reopen PowerShell and run the command again.
 
-It then prints your world's region and the Oracle region to choose, for example:
+It then finds your world's game server (and your TeamSpeak 3 server, if TeamSpeak is open) and prints the Oracle region to choose, for example:
 
 ```
-Wrote game-routes.txt (52 ranges) for: sa-east-1
+Wrote game-routes.txt: Tibia 172.65.196.38 18.228.57.100, TeamSpeak 51.81.31.251
   sa-east-1 -> pick Oracle home region: sa-saopaulo-1
 ```
+
+Only these addresses go through the tunnel. YouTube, Twitch, Spotify, Discord and everything else stay on your
+normal internet, so they never use phone data.
 
 If you don't have a server yet, it stops here and asks for your Oracle home region. That's expected: you create the account in the next step.
 
@@ -129,8 +132,15 @@ This works when Tibia runs in a **window** (maximized or borderless). Windows do
 *exclusive* fullscreen game; only programs that hook into the game itself can, and that risks BattlEye.
 If you play fullscreen and can't see the pill, switch Tibia to windowed, maximized. You'll still hear a beep when a connection goes down.
 
-**Phone data:** the tunnel sends every game packet over the phone too. Tibia uses little data,
-but check your plan. The pill counts it and tells you every 1 GB.
+**Phone data:** the tunnel sends every game packet over the phone too. Tibia uses about 15–20 MB per hour,
+TeamSpeak voice about 30–50 MB per hour. Videos, streams and music don't go through the tunnel. The pill counts
+the phone data and tells you every 1 GB.
+
+**Other worlds and new addresses are picked up by themselves.** If Tibia connects to a game server that isn't in
+the tunnel yet (an alt on another world, or a world that moved), the pill turns red: **"Tibia NOT protected: relog"**.
+It adds that server's whole Amazon block on its own (Tibia gets a different address on each login), and after you log out it reloads the tunnel. From your next login, that world is protected.
+A new TeamSpeak 3 server is added the same way. TeamSpeak reconnects by itself after the reload.
+This only reads Windows' list of open connections (like `netstat`). It never touches Tibia's process, files or memory.
 
 ---
 
@@ -141,7 +151,9 @@ but check your plan. The pill counts it and tells you every 1 GB.
   Or run this as administrator: `& "C:\Program Files\WireGuard\wireguard.exe" /uninstalltunnelservice tibia-mi`.
 - **Can't find the pill**: open Multi-Internet again. Only one copy can run, so this doesn't disturb your connection: it moves the open pill to the bottom-right corner of your main monitor. If that copy has frozen, a message tells you what to do.
 - **Windows Firewall asks about Python**: allow it on private networks.
-- **A world isn't covered** (lag goes away after Disconnect): log into that world, delete `game-routes.txt`, and run setup again.
+- **"Tibia NOT protected: relog"**: that world isn't in the tunnel yet. It has already been added: log out and back in.
+- **Set up before this version?** Your `game-routes.txt` holds every AWS range in your region, so some video and website traffic uses phone data too.
+  To keep only Tibia and TeamSpeak: log into a world, open TeamSpeak, then run `py windows\make_routes_win.py` and restart the pill.
 - **Mac and PC with the same server**: they share the same key (`mac.key`), so use one at a time.
 
 ## Files
@@ -149,8 +161,8 @@ but check your plan. The pill counts it and tells you every 1 GB.
 | File | What it does |
 |---|---|
 | `windows\setup.ps1` | Installs the tools, creates keys, routes, the Oracle server (or reuses yours), and the desktop shortcut |
-| `windows\make_routes_win.py` | Finds your world's AWS region from Tibia's connection, then runs `make_routes.py` |
-| `windows\multi_internet.pyw` | The pill and the duplicator. It sends each WireGuard packet out every connection (`IP_UNICAST_IF` pins a socket to one adapter). It also starts and stops the WireGuard tunnel service, which carries only the game routes |
+| `windows\make_routes_win.py` | Writes `game-routes.txt` from Tibia's game connection (port 7171) and TeamSpeak 3's log, and prints your Oracle region. Name a region (`sa-east-1`) for the old, broad list from `make_routes.py` |
+| `windows\multi_internet.pyw` | The pill and the duplicator. It sends each WireGuard packet out every connection (`IP_UNICAST_IF` pins a socket to one adapter). It also starts and stops the WireGuard tunnel service, which carries only the game routes, and adds new Tibia or TeamSpeak servers to them |
 
 The server side (`server\`) is the same as the Mac version, with no changes.
 

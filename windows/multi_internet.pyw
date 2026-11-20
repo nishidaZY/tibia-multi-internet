@@ -5,7 +5,7 @@ iPhone USB or hotspot, Android USB). If one drops, the other copy is already arr
 MB = phone data used by the tunnel this month. Drag to move. Right-click: reset counter / quit.
 Run: pythonw multi_internet.pyw   (asks for admin: WireGuard needs it)
 Self-check without Windows: python3 multi_internet.pyw --selftest"""
-import ctypes, ctypes.wintypes, json, os, selectors, socket, struct, subprocess, sys, threading, time
+import ctypes, ctypes.wintypes, ipaddress, json, os, selectors, socket, struct, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)  # keys, server.ip and game-routes.txt live in the project folder
@@ -54,6 +54,31 @@ def make_conf(key, server_pub, routes, port=LOCAL):
             % (key, server_pub, port, ", ".join(r for r in routes if r)))
 
 
+TUNNEL_IP = "10.66.0.2"
+# Tibia game connections, read from Windows' TCP table by remote port only (what netstat shows):
+# nothing here looks at Tibia's process, window or memory (BattlEye)
+WATCH = ("Get-NetTCPConnection -State Established -RemotePort 7171,7172 -ErrorAction SilentlyContinue | "
+         "% { $_.LocalAddress + ' ' + $_.RemoteAddress }")
+
+
+def game_conns(out):
+    """WATCH output -> [(local ip, server ip)] for IPv4 game connections."""
+    conns = []
+    for line in out.splitlines():
+        p = line.split()
+        if len(p) == 2 and ":" not in p[1]: conns.append((p[0], p[1]))
+    return conns
+
+
+def covered(ip, routes):
+    a = ipaddress.ip_address(ip)
+    for r in routes:
+        try:
+            if r.strip() and a in ipaddress.ip_network(r.strip(), strict=False): return True
+        except ValueError: pass
+    return False
+
+
 def bind_local(sock, port=LOCAL):
     """Uses the usual port, or any free one if another program holds it: the WireGuard config
     is rewritten on every connect, so it always points at the port we actually got."""
@@ -85,9 +110,14 @@ if "--selftest" in sys.argv:
     held.bind(("127.0.0.1", 0))
     assert bind_local(spare, held.getsockname()[1]) not in (0, held.getsockname()[1])  # busy port -> another free one
     held.close(); spare.close()
+    assert game_conns("10.66.0.2 18.228.57.100\n192.168.15.76 1.2.3.4\n\n:: ::1\n") == \
+        [("10.66.0.2", "18.228.57.100"), ("192.168.15.76", "1.2.3.4")]
+    assert covered("172.65.196.38", ["18.228.57.100/32", "172.65.0.0/16"])
+    assert covered("18.228.57.100", ["18.228.57.100/32", ""]) and not covered("18.228.57.101", ["18.228.57.100/32", "junk"])
     print("selftest ok"); sys.exit()
 
 import tkinter as tk  # noqa: E402  (after the selftest so it runs anywhere)
+from make_routes_win import route_for, teamspeak_server  # noqa: E402  (same folder)
 
 WG_EXE = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "WireGuard", "wireguard.exe")
 CONF_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "tibia-mi")
@@ -207,6 +237,38 @@ class Dup:
             s.close()
 
 
+class GameWatch(threading.Thread):
+    """Every 3 s while connected: is Tibia's game connection inside the tunnel? If not, the pill warns,
+    and the server's address is added to game-routes.txt (so is a new TeamSpeak 3 server). The tunnel is
+    reloaded with it only once no game connection is open (after you log out), because rerouting a live
+    connection would drop it. TeamSpeak reconnects by itself after that reload."""
+    def __init__(self, app):
+        super().__init__(daemon=True); self.app, self.bad, self.reload = app, [], False
+
+    def run(self):
+        while True:
+            time.sleep(3)
+            a = self.app
+            if not (a.on and a.dup): self.bad = []; continue
+            conns = game_conns(run(["powershell", "-NoProfile", "-NonInteractive", "-Command", WATCH]).stdout)
+            self.bad = sorted({ip for local, ip in conns if local != TUNNEL_IP})
+            try: routes = read("game-routes.txt").splitlines()
+            except OSError: continue
+            ts = teamspeak_server()  # voice protected too: TeamSpeak 3's last server, from its own log
+            new = [route_for(ip) for ip in self.bad if not covered(ip, routes)]  # Tibia: its whole AWS block
+            if ts and not covered(ts, routes): new.append(f"{ts}/32")
+            new = list(dict.fromkeys(new))
+            if new:
+                try:
+                    with open(os.path.join(ROOT, "game-routes.txt"), "a") as f:
+                        f.write("".join(f"{r}\n" for r in new))  # learned automatically
+                    self.reload = True
+                except OSError: pass
+            if self.reload and not conns and a.on and a.dup:  # logged out: safe to reload the tunnel
+                self.reload = False
+                if tunnel_up(a.dup.port).returncode == 0: a.say("Tibia world added: protected next login", 8)
+
+
 def tunnel_down():
     run([WG_EXE, "/uninstalltunnelservice", TUNNEL])
 
@@ -234,6 +296,7 @@ class App:
         self.shown, self.pending, self.msg, self.msg_until, self.sure_until = {}, {}, "", 0, 0
         self.last_phone, self.checking, self.server_dead = 0, False, False
         self.usage = self.load_usage()
+        self.watch, self.warned = GameWatch(self), False
 
         r = self.root = tk.Tk()
         r.overrideredirect(True)
@@ -256,6 +319,7 @@ class App:
         self.clear_show()
         self.render(); self.keep_on_top(); r.update(); self.to_corner()  # visible first: the cleanup below can take seconds
         tunnel_down()  # a leftover tunnel from a crash would send the game into nothing
+        self.watch.start()
         self.tick()
         r.mainloop()
 
@@ -354,6 +418,8 @@ class App:
                 self.checking = False
                 if ok and self.on: self.server_dead = True  # tk is only touched from the UI thread
             threading.Thread(target=check, daemon=True).start()
+        if self.watch.bad and not self.warned: ctypes.windll.user32.MessageBeep(0x30)
+        self.warned = bool(self.watch.bad)
         self.render()
 
     def say(self, msg, secs=5):
@@ -371,7 +437,10 @@ class App:
             t = c.create_text(x, H / 2, text="●", fill=col, anchor="w", font=("Segoe UI", 11)); x = c.bbox(t)[2] + 3
             t = c.create_text(x, H / 2, text=name, fill="white", anchor="w", font=font); x = c.bbox(t)[2] + 10
         info = self.msg if time.time() < self.msg_until else gb(self.month_bytes())
-        t = c.create_text(x, H / 2, text=info, fill="#d9d9d9", anchor="w", font=font); x = c.bbox(t)[2] + 10
+        bad = self.on and self.watch.bad  # Tibia is playing outside the tunnel: say so until it's fixed
+        if bad: info = "Tibia NOT protected: relog"
+        t = c.create_text(x, H / 2, text=info, fill=RED if bad else "#d9d9d9", anchor="w", font=bold if bad else font)
+        x = c.bbox(t)[2] + 10
         sure = time.time() < self.sure_until
         label = "Sure?" if sure else "…" if self.busy else "Disconnect" if self.on else "Connect"
         t = c.create_text(x + 9, H / 2, text=label, fill="white", anchor="w", font=bold, tags="btn")
